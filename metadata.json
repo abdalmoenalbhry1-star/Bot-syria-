@@ -1,0 +1,6 @@
+{
+  "name": "بوت سوريا للربح - BOT SYRIA",
+  "description": "تطبيق متكامل لربح المال وتنفيذ المهام اليومية مع دعم سحب الأرباح عبر سيريتل كاش وشام كاش وكود الهدية ونظام الإحالات.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
