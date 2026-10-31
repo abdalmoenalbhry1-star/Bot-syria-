@@ -272,6 +272,22 @@ export default function App() {
     }
   }, [systemConfig]);
 
+  // Sync tasks from server SQLite database
+  useEffect(() => {
+    fetch('/api/tasks')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.tasks) && data.tasks.length > 0) {
+          setTasks((prev) => {
+            const existingIds = new Set(prev.map((t) => t.id));
+            const fresh = data.tasks.filter((t: TaskItem) => !existingIds.has(t.id));
+            return fresh.length > 0 ? [...prev, ...fresh] : prev;
+          });
+        }
+      })
+      .catch((err) => console.error('Failed to sync tasks from server:', err));
+  }, []);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
@@ -298,7 +314,25 @@ export default function App() {
       })
     );
 
-    const taskTitle = tasks.find((t) => t.id === taskId)?.title || 'المهمة';
+    const targetTask = tasks.find((t) => t.id === taskId);
+    const taskTitle = targetTask?.title || 'المهمة';
+    const reward = targetTask?.reward || 1500;
+
+    // Persist proof submission in backend SQLite database
+    fetch('/api/tasks/submit-proof', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: user.id,
+        userName: user.name,
+        taskId,
+        taskTitle,
+        reward,
+        proofImage,
+        proofNote,
+      }),
+    }).catch((err) => console.error('Failed to send proof to server:', err));
+
     setNotifications((prev) => [
       {
         id: `notif-${Date.now()}`,

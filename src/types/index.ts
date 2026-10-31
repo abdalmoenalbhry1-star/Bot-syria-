@@ -36,6 +36,21 @@ export interface TaskItem {
   approvedAt?: number; // timestamp in ms; expires after 6 hours from approval
 }
 
+export interface TaskSubmission {
+  id: string;
+  userId: string;
+  userName?: string;
+  taskId: string;
+  taskTitle: string;
+  reward: number;
+  proofImage: string;
+  proofNote?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: number;
+  reviewedAt?: number | null;
+  rejectionReason?: string | null;
+}
+
 export type PaymentProvider = 'syriatel_cash' | 'sham_cash';
 
 export interface WithdrawalMethod {

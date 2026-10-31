@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   TaskItem,
+  TaskSubmission,
   WithdrawalTransaction,
   UserProfile,
   SupportTicket,
@@ -152,6 +153,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Feedback banner
   const [adminFeedback, setAdminFeedback] = useState<string | null>(null);
+
+  // Real task submissions from SQLite database (Phase 1)
+  const [dbSubmissions, setDbSubmissions] = useState<TaskSubmission[]>([]);
+  const [isLoadingSubmissions, setIsLoadingSubmissions] = useState(false);
+
+  const fetchSubmissions = async () => {
+    try {
+      setIsLoadingSubmissions(true);
+      const res = await fetch('/api/admin/submissions?status=pending', {
+        headers: {
+          'x-admin-password': ADMIN_PASSWORD_CORRECT,
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.submissions)) {
+          setDbSubmissions(data.submissions);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching submissions from database:', err);
+    } finally {
+      setIsLoadingSubmissions(false);
+    }
+  };
+
+  // Auto-refresh task submissions every 5 seconds when authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchSubmissions();
+      const interval = setInterval(fetchSubmissions, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [isAuthenticated]);
 
   const showFeedback = (msg: string) => {
     setAdminFeedback(msg);
@@ -425,7 +460,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // NAVIGATION BAR ITEMS REQUESTED BY USER:
   // الاثباتات، السحوبات، الدعم الفني، الإحصائيات، تعديل القيم، ارسال اشعار، اضافة رصيد بالايدي، برومو كود، اضافة مهمة، حذف مهمة، إيقاف وتشغيل البوت
   const navTabs: { id: AdminSection; label: string; badge?: number; icon: any }[] = [
-    { id: 'proofs', label: 'الإثباتات', badge: pendingProofs.length, icon: ClipboardCheck },
+    { id: 'proofs', label: 'الإثباتات', badge: dbSubmissions.length, icon: ClipboardCheck },
     { id: 'withdrawals', label: 'السحوبات', badge: pendingWithdrawals.length, icon: Wallet },
     { id: 'support', label: 'الدعم الفني', badge: pendingTickets.length, icon: Headphones },
     { id: 'stats', label: 'الإحصائيات', icon: BarChart3 },
@@ -505,72 +540,141 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </div>
         )}
 
-        {/* 1. الإثباتات (Proofs) */}
+        {/* 1. الإثباتات الحقيقية من قاعدة البيانات (Task Submissions from Database) */}
         {activeTab === 'proofs' && (
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-200">
-                إثباتات المهام بانتظار قرار الإدارة ({pendingProofs.length})
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-200">
+                  إثباتات المهام الحقيقية في قاعدة البيانات ({dbSubmissions.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={fetchSubmissions}
+                  disabled={isLoadingSubmissions}
+                  className="px-2 py-1 rounded-lg bg-cyan-950/70 border border-cyan-500/40 text-cyan-300 hover:text-white text-[11px] flex items-center gap-1 transition-all disabled:opacity-50"
+                  title="تحديث فوري من قاعدة البيانات"
+                >
+                  <RotateCcw className={`w-3 h-3 ${isLoadingSubmissions ? 'animate-spin' : ''}`} />
+                  <span>تحديث</span>
+                </button>
+              </div>
+              <span className="text-[11px] text-cyan-300 font-mono">
+                {isLoadingSubmissions ? 'جارٍ المزامنة...' : 'تحديث تلقائي مستمر ⚡'}
               </span>
-              <span className="text-[11px] text-cyan-300">موافقة = منح النقاط فوراً</span>
             </div>
 
-            {pendingProofs.length === 0 ? (
-              <div className="glass-panel rounded-2xl p-8 text-center text-slate-400 text-xs">
-                لا توجد إثباتات معلقة للمراجعة حالياً.
+            {dbSubmissions.length === 0 ? (
+              <div className="glass-panel rounded-2xl p-8 text-center text-slate-400 text-xs flex flex-col items-center gap-2">
+                <ClipboardCheck className="w-8 h-8 text-slate-600 mb-1" />
+                <span>
+                  {isLoadingSubmissions
+                    ? 'جارٍ فحص قاعدة البيانات ومزامنة الإثباتات...'
+                    : 'لا توجد إثباتات معلقة في جدول task_submissions حالياً.'}
+                </span>
+                <span className="text-[10px] text-slate-500">
+                  أي مستخدم يرفع إثباتاً من التطبيق سيظهر هنا فوراً وتلقائياً.
+                </span>
               </div>
             ) : (
-              pendingProofs.map((task) => (
-                <div key={task.id} className="glass-panel rounded-2xl p-4 border border-amber-500/40 flex flex-col gap-3">
-                  <div className="flex items-start justify-between">
-                    <div className="flex flex-col">
-                      <span className="font-bold text-sm text-white">{task.title}</span>
-                      <span className="text-[11px] text-slate-400 mt-0.5">
-                        المكافأة: +{task.reward.toLocaleString('en-US')} ل.س • الوقت: {task.submittedAt || 'الآن'}
+              dbSubmissions.map((sub) => {
+                const formattedTime = new Date(sub.createdAt).toLocaleTimeString('ar-SY', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                });
+                const formattedDate = new Date(sub.createdAt).toLocaleDateString('ar-SY', {
+                  month: 'short',
+                  day: 'numeric',
+                });
+
+                return (
+                  <div
+                    key={sub.id}
+                    className="glass-panel rounded-2xl p-4 border border-amber-500/40 flex flex-col gap-3 shadow-lg hover:border-amber-400 transition-all"
+                  >
+                    {/* Header: User ID & Task Info */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex flex-col gap-1 text-right">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-black text-sm text-white">{sub.taskTitle}</span>
+                          <span className="px-2 py-0.5 rounded-lg bg-cyan-950/90 border border-cyan-400/50 text-[11px] text-cyan-300 font-mono font-bold">
+                            معرف المستخدم: {sub.userId}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-slate-300">
+                          <span>
+                            <strong>اسم الحساب:</strong> {sub.userName || `مستخدم [${sub.userId}]`}
+                          </span>
+                          <span>•</span>
+                          <span className="text-amber-300 font-mono font-bold">
+                            المكافأة: +{sub.reward.toLocaleString('en-US')} ل.س
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                          <Clock className="w-3 h-3 text-cyan-400" />
+                          <span>وقت الإرسال: {formattedDate} - {formattedTime}</span>
+                        </div>
+                      </div>
+
+                      <span className="px-2 py-0.5 rounded-full bg-amber-950/90 border border-amber-400/60 text-amber-300 text-[10px] font-bold shrink-0">
+                        قيد التدقيق
                       </span>
                     </div>
-                    <span className="px-2 py-0.5 rounded-full bg-amber-950 border border-amber-400/50 text-amber-300 text-[10px] font-bold">
-                      قيد التدقيق
-                    </span>
-                  </div>
 
-                  {task.proofImage && (
-                    <div className="rounded-xl border border-cyan-500/30 overflow-hidden bg-black/60 p-2">
-                      <img src={task.proofImage} alt="Submitted proof" className="w-full max-h-48 object-contain rounded-lg" />
+                    {/* Proof Image */}
+                    {sub.proofImage && (
+                      <div className="rounded-xl border border-cyan-500/30 overflow-hidden bg-black/80 p-2 flex flex-col items-center">
+                        <img
+                          src={sub.proofImage}
+                          alt="Submitted proof screenshot"
+                          className="w-full max-h-56 object-contain rounded-lg"
+                        />
+                      </div>
+                    )}
+
+                    {/* User Note */}
+                    {sub.proofNote ? (
+                      <div className="p-2.5 rounded-xl bg-[#071626] border border-cyan-500/30 text-xs text-slate-200">
+                        <strong className="text-cyan-300">ملاحظة المستخدم:</strong> {sub.proofNote}
+                      </div>
+                    ) : (
+                      <div className="p-2 rounded-xl bg-[#071626]/40 border border-slate-700/30 text-[11px] text-slate-400">
+                        <em>لا توجد ملاحظة إضافية مرفقة مع الإثبات</em>
+                      </div>
+                    )}
+
+                    {/* Action buttons */}
+                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-cyan-500/20">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onApproveProof(sub.taskId || sub.id);
+                          setDbSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
+                          showFeedback(`تمت الموافقة على إثبات المستخدم [${sub.userId}] وصرف المكافأة!`);
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>موافقة ومنح النقاط</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onRejectProof(sub.taskId || sub.id, 'الصورة غير واضحة أو لم يتم استيفاء شروط المهمة');
+                          setDbSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
+                          showFeedback(`تم رفض الإثبات للمستخدم [${sub.userId}] وإعادة المهمة.`);
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-rose-950/90 hover:bg-rose-900 border border-rose-500/60 text-rose-300 hover:text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all"
+                      >
+                        <XCircle className="w-4 h-4" />
+                        <span>رفض وإعادة المهمة</span>
+                      </button>
                     </div>
-                  )}
-
-                  {task.proofNote && (
-                    <div className="p-2.5 rounded-xl bg-[#071626] border border-cyan-500/20 text-xs text-slate-300">
-                      <strong>ملاحظة المستخدم:</strong> {task.proofNote}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-2 pt-2 border-t border-cyan-500/20">
-                    <button
-                      onClick={() => {
-                        onApproveProof(task.id);
-                        showFeedback('تمت الموافقة على الإثبات وصرف المكافأة للمستخدم!');
-                      }}
-                      className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-xs font-black flex items-center justify-center gap-1.5"
-                    >
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>موافقة ومنح النقاط</span>
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        onRejectProof(task.id, 'الصورة غير واضحة أو لم يتم الانضمام');
-                        showFeedback('تم رفض الإثبات وإعادة المهمة للمستخدم.');
-                      }}
-                      className="py-2.5 px-3 rounded-xl bg-rose-950 border border-rose-500/50 text-rose-300 text-xs font-black flex items-center justify-center gap-1.5"
-                    >
-                      <XCircle className="w-4 h-4" />
-                      <span>رفض وإعادة المهمة</span>
-                    </button>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         )}
