@@ -193,6 +193,72 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setTimeout(() => setAdminFeedback(null), 3000);
   };
 
+  // Processing state for atomic approve/reject calls
+  const [processingSubId, setProcessingSubId] = useState<string | null>(null);
+  const [rejectReasonInputs, setRejectReasonInputs] = useState<Record<string, string>>({});
+
+  const handleApproveSubmission = async (sub: TaskSubmission) => {
+    if (processingSubId) return;
+    setProcessingSubId(sub.id);
+    try {
+      const res = await fetch(`/api/admin/submissions/${sub.id}/approve`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-password': ADMIN_PASSWORD_CORRECT,
+        },
+        body: JSON.stringify({ adminId: user.id }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setDbSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
+        showFeedback(
+          `تمت الموافقة بنجاح! صُرفت +${Number(data.creditedAmount || sub.reward).toLocaleString(
+            'en-US'
+          )} ل.س لرصيد المستخدم [${sub.userId}] وتوثقت في السجل المالي.`
+        );
+        onApproveProof(sub.taskId || sub.id);
+      } else {
+        showFeedback(`تنبيه: ${data.error || 'تعذر اعتماد الإثبات'}`);
+      }
+    } catch (err) {
+      console.error('Failed to approve submission on server:', err);
+      showFeedback('حدث خطأ في الاتصال بالخادم أثناء الاعتماد');
+    } finally {
+      setProcessingSubId(null);
+    }
+  };
+
+  const handleRejectSubmission = async (sub: TaskSubmission) => {
+    if (processingSubId) return;
+    setProcessingSubId(sub.id);
+    const reason =
+      rejectReasonInputs[sub.id]?.trim() || 'الصورة غير واضحة أو لم يتم استيفاء شروط المهمة';
+    try {
+      const res = await fetch(`/api/admin/submissions/${sub.id}/reject`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-password': ADMIN_PASSWORD_CORRECT,
+        },
+        body: JSON.stringify({ reason }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setDbSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
+        showFeedback(`تم رفض الإثبات للمستخدم [${sub.userId}] وحفظ سبب الرفض في قاعدة البيانات.`);
+        onRejectProof(sub.taskId || sub.id, reason);
+      } else {
+        showFeedback(`تنبيه: ${data.error || 'تعذر رفض الإثبات'}`);
+      }
+    } catch (err) {
+      console.error('Failed to reject submission on server:', err);
+      showFeedback('حدث خطأ في الاتصال بالخادم أثناء الرفض');
+    } finally {
+      setProcessingSubId(null);
+    }
+  };
+
   // Lockout countdown
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -644,32 +710,43 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       </div>
                     )}
 
-                    {/* Action buttons */}
+                    {/* Inline Custom Rejection Reason Input */}
+                    <div className="flex items-center gap-2 p-2 rounded-xl bg-[#05101c] border border-cyan-500/20">
+                      <span className="text-[10px] text-slate-400 shrink-0 font-bold">سبب الرفض (عند الرفض):</span>
+                      <input
+                        type="text"
+                        placeholder="الصورة غير واضحة، لم يتم الانضمام، إلخ..."
+                        value={rejectReasonInputs[sub.id] || ''}
+                        onChange={(e) =>
+                          setRejectReasonInputs({
+                            ...rejectReasonInputs,
+                            [sub.id]: e.target.value,
+                          })
+                        }
+                        className="w-full bg-transparent text-xs text-white placeholder:text-slate-600 focus:outline-none"
+                      />
+                    </div>
+
+                    {/* Action buttons with atomic server execution */}
                     <div className="grid grid-cols-2 gap-2 pt-2 border-t border-cyan-500/20">
                       <button
                         type="button"
-                        onClick={() => {
-                          onApproveProof(sub.taskId || sub.id);
-                          setDbSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
-                          showFeedback(`تمت الموافقة على إثبات المستخدم [${sub.userId}] وصرف المكافأة!`);
-                        }}
-                        className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all"
+                        disabled={processingSubId === sub.id}
+                        onClick={() => handleApproveSubmission(sub)}
+                        className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-wait"
                       >
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>موافقة ومنح النقاط</span>
+                        <CheckCircle2 className={`w-4 h-4 ${processingSubId === sub.id ? 'animate-spin' : ''}`} />
+                        <span>{processingSubId === sub.id ? 'جارٍ الاعتماد بالخادم...' : 'موافقة ومنح النقاط'}</span>
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => {
-                          onRejectProof(sub.taskId || sub.id, 'الصورة غير واضحة أو لم يتم استيفاء شروط المهمة');
-                          setDbSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
-                          showFeedback(`تم رفض الإثبات للمستخدم [${sub.userId}] وإعادة المهمة.`);
-                        }}
-                        className="py-2.5 px-3 rounded-xl bg-rose-950/90 hover:bg-rose-900 border border-rose-500/60 text-rose-300 hover:text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all"
+                        disabled={processingSubId === sub.id}
+                        onClick={() => handleRejectSubmission(sub)}
+                        className="py-2.5 px-3 rounded-xl bg-rose-950/90 hover:bg-rose-900 border border-rose-500/60 text-rose-300 hover:text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-wait"
                       >
-                        <XCircle className="w-4 h-4" />
-                        <span>رفض وإعادة المهمة</span>
+                        <XCircle className={`w-4 h-4 ${processingSubId === sub.id ? 'animate-spin' : ''}`} />
+                        <span>{processingSubId === sub.id ? 'جارٍ تسجيل الرفض...' : 'رفض وإعادة المهمة'}</span>
                       </button>
                     </div>
                   </div>

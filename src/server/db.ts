@@ -105,10 +105,12 @@ function initSchema(db: Database) {
       user_id TEXT NOT NULL,
       type TEXT NOT NULL,
       amount INTEGER NOT NULL,
-      reference_id TEXT,
+      reference_id TEXT NOT NULL,
       description TEXT,
       created_at INTEGER NOT NULL
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_reward_ledger_ref_type ON reward_ledger(reference_id, type);
 
     CREATE TABLE IF NOT EXISTS withdrawals (
       id TEXT PRIMARY KEY,
@@ -323,4 +325,280 @@ export async function getAllTasks(): Promise<any[]> {
   }
   stmt.free();
   return results;
+}
+
+export interface ApproveSubmissionResult {
+  success: boolean;
+  error?: string;
+  submission?: DbTaskSubmission;
+  creditedAmount?: number;
+  newBalance?: number;
+  userId?: string;
+}
+
+export async function approveTaskSubmission(
+  submissionId: string,
+  reviewerAdminId?: string
+): Promise<ApproveSubmissionResult> {
+  const db = await getDb();
+
+  // 1. Fetch submission
+  const subStmt = db.prepare('SELECT * FROM task_submissions WHERE id = ? LIMIT 1');
+  subStmt.bind([submissionId]);
+  let submission: DbTaskSubmission | null = null;
+  if (subStmt.step()) {
+    submission = subStmt.getAsObject() as unknown as DbTaskSubmission;
+  }
+  subStmt.free();
+
+  if (!submission) {
+    return { success: false, error: 'لم يتم العثور على الإثبات المطلوب' };
+  }
+
+  // 2. Prevent duplicate processing
+  if (submission.status !== 'pending') {
+    return {
+      success: false,
+      error: `تمت معالجة هذا الإثبات مسبقاً (الحالة الحالية: ${submission.status})`,
+    };
+  }
+
+  // 3. Security check: Manager cannot approve their own submission
+  if (reviewerAdminId && reviewerAdminId === submission.user_id) {
+    return {
+      success: false,
+      error: 'إجراء أمني: لا يمكن للمدير الموافقة على إثباته الخاص بنفسه',
+    };
+  }
+
+  // 4. Do not trust client reward. Fetch authoritative reward from tasks table on server
+  let authoritativeReward = submission.reward;
+  const taskStmt = db.prepare('SELECT reward FROM tasks WHERE id = ? LIMIT 1');
+  taskStmt.bind([submission.task_id]);
+  if (taskStmt.step()) {
+    const taskRow = taskStmt.getAsObject();
+    if (typeof taskRow.reward === 'number' && taskRow.reward > 0) {
+      authoritativeReward = taskRow.reward;
+    }
+  }
+  taskStmt.free();
+
+  // 5. Atomic transaction to prevent duplicate reward
+  const now = Date.now();
+  const ledgerId = `rw-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
+  try {
+    db.run('BEGIN TRANSACTION;');
+
+    // Update submission status to approved (atomic condition: status = 'pending')
+    db.run(
+      `UPDATE task_submissions 
+       SET status = 'approved', reviewed_at = ?, reward = ? 
+       WHERE id = ? AND status = 'pending'`,
+      [now, authoritativeReward, submissionId]
+    );
+
+    const rowsModified = db.getRowsModified();
+    if (rowsModified === 0) {
+      db.run('ROLLBACK;');
+      return {
+        success: false,
+        error: 'فشلت العملية: تم تعديل أو اعتماد الإثبات من جلسة أخرى بالتزامن',
+      };
+    }
+
+    // Ensure user exists in users table
+    const userCheckStmt = db.prepare('SELECT balance FROM users WHERE id = ? LIMIT 1');
+    userCheckStmt.bind([submission.user_id]);
+    const userExists = userCheckStmt.step();
+    userCheckStmt.free();
+
+    if (!userExists) {
+      db.run(
+        `INSERT INTO users (id, name, balance, today_earnings, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [submission.user_id, submission.user_name || `مستخدم ${submission.user_id}`, authoritativeReward, authoritativeReward, now]
+      );
+    } else {
+      // Credit user's balance on server
+      db.run(
+        `UPDATE users 
+         SET balance = balance + ?, today_earnings = today_earnings + ? 
+         WHERE id = ?`,
+        [authoritativeReward, authoritativeReward, submission.user_id]
+      );
+    }
+
+    // Insert into reward ledger with UNIQUE constraint on (reference_id, type)
+    db.run(
+      `INSERT INTO reward_ledger (id, user_id, type, amount, reference_id, description, created_at)
+       VALUES (?, ?, 'task_reward', ?, ?, ?, ?)`,
+      [
+        ledgerId,
+        submission.user_id,
+        authoritativeReward,
+        submissionId,
+        `مكافأة إنجاز مهمة: ${submission.task_title}`,
+        now,
+      ]
+    );
+
+    db.run('COMMIT;');
+    saveDb();
+
+    // Get updated user balance
+    let newBalance = 0;
+    const balStmt = db.prepare('SELECT balance FROM users WHERE id = ? LIMIT 1');
+    balStmt.bind([submission.user_id]);
+    if (balStmt.step()) {
+      newBalance = balStmt.getAsObject().balance as number;
+    }
+    balStmt.free();
+
+    submission.status = 'approved';
+    submission.reviewed_at = now;
+    submission.reward = authoritativeReward;
+
+    return {
+      success: true,
+      submission,
+      creditedAmount: authoritativeReward,
+      newBalance,
+      userId: submission.user_id,
+    };
+  } catch (err: any) {
+    try {
+      db.run('ROLLBACK;');
+    } catch (_) {}
+    console.error('Transaction failed during task approval:', err);
+    if (String(err?.message || '').includes('UNIQUE constraint failed')) {
+      return {
+        success: false,
+        error: 'أمان المكافآت: تم صرف مكافأة هذا الإثبات مسبقاً ومسجلة في السجل المالي',
+      };
+    }
+    return {
+      success: false,
+      error: 'فشلت معالجة الطلب في قاعدة البيانات: ' + (err?.message || 'خطأ غير معروف'),
+    };
+  }
+}
+
+export interface RejectSubmissionResult {
+  success: boolean;
+  error?: string;
+  submission?: DbTaskSubmission;
+}
+
+export async function rejectTaskSubmission(
+  submissionId: string,
+  rejectionReason: string
+): Promise<RejectSubmissionResult> {
+  const db = await getDb();
+
+  // 1. Fetch submission
+  const subStmt = db.prepare('SELECT * FROM task_submissions WHERE id = ? LIMIT 1');
+  subStmt.bind([submissionId]);
+  let submission: DbTaskSubmission | null = null;
+  if (subStmt.step()) {
+    submission = subStmt.getAsObject() as unknown as DbTaskSubmission;
+  }
+  subStmt.free();
+
+  if (!submission) {
+    return { success: false, error: 'لم يتم العثور على الإثبات المطلوب' };
+  }
+
+  if (submission.status !== 'pending') {
+    return {
+      success: false,
+      error: `تمت معالجة هذا الإثبات مسبقاً (الحالة الحالية: ${submission.status})`,
+    };
+  }
+
+  const now = Date.now();
+  const cleanReason = rejectionReason.trim() || 'الصورة غير واضحة أو لم يتم استيفاء شروط المهمة';
+
+  try {
+    db.run('BEGIN TRANSACTION;');
+
+    db.run(
+      `UPDATE task_submissions 
+       SET status = 'rejected', rejection_reason = ?, reviewed_at = ? 
+       WHERE id = ? AND status = 'pending'`,
+      [cleanReason, now, submissionId]
+    );
+
+    const rowsModified = db.getRowsModified();
+    if (rowsModified === 0) {
+      db.run('ROLLBACK;');
+      return {
+        success: false,
+        error: 'فشلت العملية: تم تعديل هذا الإثبات من جلسة أخرى',
+      };
+    }
+
+    // Restore seat in tasks table
+    db.run(
+      `UPDATE tasks SET seats_left = seats_left + 1 WHERE id = ?`,
+      [submission.task_id]
+    );
+
+    db.run('COMMIT;');
+    saveDb();
+
+    submission.status = 'rejected';
+    submission.rejection_reason = cleanReason;
+    submission.reviewed_at = now;
+
+    return {
+      success: true,
+      submission,
+    };
+  } catch (err: any) {
+    try {
+      db.run('ROLLBACK;');
+    } catch (_) {}
+    console.error('Transaction failed during task rejection:', err);
+    return {
+      success: false,
+      error: 'فشلت العملية في قاعدة البيانات: ' + (err?.message || 'خطأ غير معروف'),
+    };
+  }
+}
+
+export async function getUserBalance(userId: string): Promise<{ balance: number; todayEarnings: number } | null> {
+  const db = await getDb();
+  const stmt = db.prepare('SELECT balance, today_earnings FROM users WHERE id = ? LIMIT 1');
+  stmt.bind([userId]);
+  let res: { balance: number; todayEarnings: number } | null = null;
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    res = {
+      balance: Number(row.balance) || 0,
+      todayEarnings: Number(row.today_earnings) || 0,
+    };
+  }
+  stmt.free();
+  return res;
+}
+
+export async function getRewardLedger(userId?: string): Promise<any[]> {
+  const db = await getDb();
+  let query = 'SELECT * FROM reward_ledger';
+  const params: any[] = [];
+  if (userId) {
+    query += ' WHERE user_id = ?';
+    params.push(userId);
+  }
+  query += ' ORDER BY created_at DESC';
+
+  const stmt = db.prepare(query);
+  if (params.length > 0) stmt.bind(params);
+  const rows: any[] = [];
+  while (stmt.step()) {
+    rows.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return rows;
 }

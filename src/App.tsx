@@ -272,8 +272,26 @@ export default function App() {
     }
   }, [systemConfig]);
 
-  // Sync tasks from server SQLite database
+  // Sync user balance from server SQLite database
+  const refreshUserBalance = () => {
+    if (!user.id) return;
+    fetch(`/api/user/balance?userId=${user.id}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && typeof data.balance === 'number') {
+          setUser((prev) => ({
+            ...prev,
+            balance: data.balance,
+            todayEarnings: data.todayEarnings ?? prev.todayEarnings,
+          }));
+        }
+      })
+      .catch((err) => console.error('Failed to sync user balance from server:', err));
+  };
+
+  // Sync tasks and balance from server SQLite database
   useEffect(() => {
+    refreshUserBalance();
     fetch('/api/tasks')
       .then((res) => res.json())
       .then((data) => {
@@ -286,7 +304,7 @@ export default function App() {
         }
       })
       .catch((err) => console.error('Failed to sync tasks from server:', err));
-  }, []);
+  }, [user.id]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -384,6 +402,7 @@ export default function App() {
     ]);
 
     showToast(`تمت الموافقة! أُضيفت +${targetTask.reward.toLocaleString('en-US')} ل.س لرصيدك بنجاح ⚡`);
+    refreshUserBalance();
   };
 
   // Admin Rejection: Task returns back to available list + restore seat

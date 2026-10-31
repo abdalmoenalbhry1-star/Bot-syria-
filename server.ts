@@ -7,6 +7,10 @@ import {
   getUserSubmissions,
   createSubmission,
   getAllTasks,
+  approveTaskSubmission,
+  rejectTaskSubmission,
+  getUserBalance,
+  getRewardLedger,
 } from './src/server/db.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -148,13 +152,90 @@ async function startServer() {
     }
   });
 
-  // Admin login verification endpoint
-  app.post('/api/admin/verify-login', (req: Request, res: Response) => {
-    const { password, userId } = req.body;
-    if (String(password).trim() === ADMIN_PASSWORD && (!userId || String(userId).trim() === ADMIN_ID)) {
-      return res.json({ success: true, authorized: true });
+  // Admin approve task submission (Phase 2)
+  app.post('/api/admin/submissions/:id/approve', verifyAdmin, async (req: Request, res: Response) => {
+    try {
+      const submissionId = req.params.id;
+      const adminUserId = (req.body.adminId || req.headers['x-admin-id'] || ADMIN_ID).toString();
+
+      const result = await approveTaskSubmission(submissionId, adminUserId);
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          error: result.error || 'تعذر اعتماد الإثبات',
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'تم اعتماد الإثبات وصرف المكافأة بنجاح في قاعدة البيانات',
+        creditedAmount: result.creditedAmount,
+        newBalance: result.newBalance,
+        userId: result.userId,
+        submission: result.submission,
+      });
+    } catch (err: any) {
+      console.error('Error approving submission:', err);
+      res.status(500).json({ success: false, error: 'حدث خطأ في الخادم أثناء اعتماد الإثبات' });
     }
-    return res.status(401).json({ success: false, authorized: false, error: 'Invalid admin credentials' });
+  });
+
+  // Admin reject task submission (Phase 2)
+  app.post('/api/admin/submissions/:id/reject', verifyAdmin, async (req: Request, res: Response) => {
+    try {
+      const submissionId = req.params.id;
+      const reason = req.body.reason ? String(req.body.reason) : 'الصورة غير واضحة أو لم يتم استيفاء شروط المهمة';
+
+      const result = await rejectTaskSubmission(submissionId, reason);
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          error: result.error || 'تعذر رفض الإثبات',
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'تم رفض الإثبات وحفظ سبب الرفض بنجاح',
+        submission: result.submission,
+      });
+    } catch (err: any) {
+      console.error('Error rejecting submission:', err);
+      res.status(500).json({ success: false, error: 'حدث خطأ في الخادم أثناء رفض الإثبات' });
+    }
+  });
+
+  // Get user balance directly from database
+  app.get('/api/user/balance', async (req: Request, res: Response) => {
+    try {
+      const userId = req.query.userId as string;
+      if (!userId) {
+        return res.status(400).json({ success: false, error: 'userId is required' });
+      }
+
+      const bal = await getUserBalance(userId);
+      res.json({
+        success: true,
+        userId,
+        balance: bal?.balance || 0,
+        todayEarnings: bal?.todayEarnings || 0,
+      });
+    } catch (err) {
+      console.error('Error fetching user balance:', err);
+      res.status(500).json({ success: false, error: 'Failed to fetch balance' });
+    }
+  });
+
+  // Get reward ledger (audit trail)
+  app.get('/api/admin/ledger', verifyAdmin, async (req: Request, res: Response) => {
+    try {
+      const userId = req.query.userId as string | undefined;
+      const ledger = await getRewardLedger(userId);
+      res.json({ success: true, count: ledger.length, ledger });
+    } catch (err) {
+      console.error('Error fetching reward ledger:', err);
+      res.status(500).json({ success: false, error: 'Failed to fetch ledger' });
+    }
   });
 
   // Vite Integration
